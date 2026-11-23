@@ -1605,6 +1605,175 @@
     '<a class="primary wide big" style="display:flex;align-items:center;justify-content:center;margin-top:14px" target="_blank" rel="noopener" href="https://explorer.solana.com/tx/' + encodeURIComponent(a.sig) + '?cluster=devnet">↗ Explorer</a>';
   });
  }
+ /* ══════════════ クラウド（Supabase）: 音声の公開・スレッドのリンク共有 ══════════════
+    秘密の値（ホスト／投稿者トークン）は端末の localStorage にだけ置き、サーバーにはハッシュだけ送る。 */
+ var SB_LS = 'sonova.sb', TOK_LS = 'sonova.tokens';
+ function sbCfg() { var c = lsGet(SB_LS, null); return c && c.url && c.key ? { url: String(c.url).trim().replace(/\/+$/, ''), key: String(c.key).trim() } : null; }
+ function cloudOn() { return !!sbCfg(); }
+ function getTok(k) { return (lsGet(TOK_LS, {}) || {})[k] || ''; }
+ function setTok(k, v) { var t = lsGet(TOK_LS, {}) || {}; if (v) t[k] = v; else delete t[k]; lsSet(TOK_LS, t); }
+ function randHex(n) { var a = new Uint8Array(n); crypto.getRandomValues(a); return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
+ function sbHeaders(extra) { var c = sbCfg(); return Object.assign({ apikey: c.key, Authorization: 'Bearer ' + c.key }, extra || {}); }
+ function sbRpc(name, args) {
+  var c = sbCfg(); if (!c) return Promise.reject(new Error('nocloud'));
+  return fetch(c.url + '/rest/v1/rpc/' + name, { method: 'POST', headers: sbHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(args) }).then(function (r) {
+   return r.text().then(function (t) {
+    var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
+    if (!r.ok) throw new Error((j && j.message) || ('http ' + r.status));
+    return j;
+   });
+  });
+ }
+ function sbSelect(table, query) {
+  var c = sbCfg(); if (!c) return Promise.reject(new Error('nocloud'));
+  return fetch(c.url + '/rest/v1/' + table + '?' + query, { headers: sbHeaders() }).then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); });
+ }
+ function sbUpload(path, blob) {
+  var c = sbCfg(), type = (blob.type || 'audio/wav').split(';')[0];
+  return fetch(c.url + '/storage/v1/object/audio/' + path, { method: 'POST', headers: sbHeaders({ 'Content-Type': type }), body: blob }).then(function (r) {
+   if (!r.ok && r.status !== 409) throw new Error('upload ' + r.status);
+   return path;
+  });
+ }
+ function audioUrl(path) { return sbCfg().url + '/storage/v1/object/public/audio/' + path; }
+ function sbDownload(path) { return fetch(audioUrl(path)).then(function (r) { if (!r.ok) throw new Error('download'); return r.blob(); }); }
+ function errToast(e) {
+  var m = (e && e.message) || '';
+  toast(m === 'full' ? 'Full' : m === 'closed' ? 'Closed' : m === 'wallet required' ? '🔗 Wallet' : m === 'taken' ? 'ID taken' : m === 'denied' ? 'Not allowed' : m === 'nocloud' ? '☁ Setting' : '☁ ✕');
+ }
+
+ /* ---------- リンク（接続先も含めるので、受け取った側は設定なしで開ける） ---------- */
+ function cfgToken() { var c = sbCfg(); return btoa(JSON.stringify([c.url, c.key])).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+ function applyCfgToken(tok) {
+  try {
+   var s = tok.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '=';
+   var a = JSON.parse(atob(s));
+   if (/^https:\/\//.test(a[0]) && a[1]) { lsSet(SB_LS, { url: a[0], key: a[1] }); return true; }
+  } catch (e) {}
+  return false;
+ }
+ function threadLink(th) { return location.href.split('#')[0].split('?')[0] + '#/t/' + th.id + '/' + cfgToken(); }
+ function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return false; });
+  return Promise.resolve(false);
+ }
+
+ /* ---------- スレッド ---------- */
+ var META_KEYS = ['title', 'songTitle', 'description', 'hostName', 'hostWallet', 'genre', 'instrumentsNeeded', 'bpm', 'timeSignature', 'rhythm', 'chordEnabled', 'chordSlots', 'timbre', 'maxLayers', 'needWallet', 'parent', 'lineage', 'createdAt'];
+ function threadMeta(th) { var m = {}; META_KEYS.forEach(function (k) { if (th[k] !== undefined) m[k] = th[k]; }); return m; }
+ function layerData(l) {
+  var d = {}; ['id', 'userId', 'userName', 'instrument', 'durationSeconds', 'createdAt', 'volume', 'hash', 'wallet', 'msg', 'sig', 'from'].forEach(function (k) { if (l[k] !== undefined) d[k] = l[k]; });
+  return d;
+ }
+ function layerPath(th, l) { return th.id + '/' + l.id + '.wav'; }
+ function cloudPushLayer(th, l) {
+  var ot = getTok('l:' + l.id) || randHex(16); setTok('l:' + l.id, ot);
+  return getAudio('layer_' + l.id).then(function (blob) {
+   if (!blob) throw new Error('noaudio');
+   return sbUpload(layerPath(th, l), blob);
+  }).then(function () {
+   return sbRpc('add_layer', { p_thread: th.id, p_id: l.id, p_data: layerData(l), p_path: layerPath(th, l), p_owner: ot });
+  });
+ }
+ function cloudPublishThread(th) {
+  var token = randHex(16);
+  return sbRpc('create_thread', { p_id: th.id, p_meta: threadMeta(th), p_public: !!th.isPublic, p_token: token }).then(function () {
+   setTok('t:' + th.id, token);
+   var chain = Promise.resolve();
+   th.layers.forEach(function (l) {
+    chain = chain.then(function () {
+     return cloudPushLayer(th, l).then(function () { if (isOff(l)) return sbRpc('set_layer_off', { p_layer: l.id, p_off: true, p_token: token }); });
+    });
+   });
+   return chain;
+  }).then(function () {
+   var cur = getThread(th.id); cur.cloud = true; cur.layers.forEach(function (l) { l.cloud = true; });
+   if (cur.status === 'closed') sbRpc('set_status', { p_id: th.id, p_status: 'closed', p_token: token }).catch(function () {});
+   saveThread(cur); return cur;
+  });
+ }
+ /* サーバーの状態をこの端末のスレッドに取り込む（新しい演奏・ホストの ON/OFF・終了） */
+ function cloudPull(id) {
+  return sbRpc('get_thread_full', { p_id: id }).then(function (res) {
+   if (!res) throw new Error('gone');
+   var meta = res.thread.meta || {};
+   var th = getThread(id);
+   if (!th) {
+    th = Object.assign({}, meta, { id: id, hostId: getTok('t:' + id) ? profile.id : 'cloud', isPublic: res.thread.is_public, password: '', status: 'open', layers: [], cloud: true, imported: true, createdAt: meta.createdAt || Date.now() });
+   }
+   var iAmHost = th.hostId === profile.id;
+   var remote = {}; res.layers.forEach(function (rl) { remote[rl.id] = rl; });
+   var chain = Promise.resolve(), added = 0;
+   res.layers.forEach(function (rl) {
+    chain = chain.then(function () {
+     var have = th.layers.filter(function (l) { return l.id === rl.id; })[0];
+     if (have) { have.hostOff = !!rl.host_off; have.cloud = true; return; }
+     return sbDownload(rl.path).then(function (blob) { return putAudio('layer_' + rl.id, blob); }).then(function () {
+      th.layers.push(Object.assign({}, rl.data, { hostOff: !!rl.host_off, fresh: iAmHost && rl.data.userId !== profile.id, cloud: true })); added++;
+     });
+    });
+   });
+   return chain.then(function () {
+    th.layers = th.layers.filter(function (l) { if (l.cloud && !remote[l.id]) { delAudio('layer_' + l.id); return false; } return true; });
+    th.status = res.thread.status === 'closed' ? 'closed' : 'open';
+    th.status = statusOf(th); th.cloud = true;
+    saveThread(th);
+    return { thread: th, added: added };
+   });
+  });
+ }
+ function cloudSetOff(th, l) { var tk = getTok('t:' + th.id); if (th.cloud && tk && l.cloud) sbRpc('set_layer_off', { p_layer: l.id, p_off: isOff(l), p_token: tk }).catch(errToast); }
+ function cloudSetStatus(th) { var tk = getTok('t:' + th.id); if (th.cloud && tk) sbRpc('set_status', { p_id: th.id, p_status: th.status === 'closed' ? 'closed' : 'open', p_token: tk }).catch(errToast); }
+ function cloudDeleteThread(th) { var tk = getTok('t:' + th.id); if (th.cloud && tk) sbRpc('delete_thread', { p_id: th.id, p_token: tk }).catch(function () {}); setTok('t:' + th.id, ''); }
+ function cloudDeleteLayer(th, l) {
+  if (!th.cloud || !l.cloud) return;
+  var tk = getTok('l:' + l.id) || getTok('t:' + th.id);
+  if (tk) sbRpc('delete_layer', { p_layer: l.id, p_token: tk }).catch(function () {});
+  setTok('l:' + l.id, '');
+ }
+ function cloudBrowse() { return sbSelect('threads', 'select=id,meta,status&is_public=eq.true&status=eq.open&order=created_at.desc&limit=30'); }
+
+ /* ---------- 作品（ライブラリ） ---------- */
+ function cloudPublishWork(session, shareId) {
+  return getAudio(session.id).then(function (blob) {
+   if (!blob) throw new Error('noaudio');
+   var ext = session.audioExt || 'wav', path = 'works/' + shareId + '-' + randHex(4) + '.' + ext;
+   return sbUpload(path, blob).then(function () {
+    var tk = randHex(16);
+    return sbRpc('publish_work', { p_share: shareId, p_title: session.title || shareId, p_credits: session.credits || null, p_anchor: session.anchor || null, p_path: path, p_dur: Math.round(session.durationSeconds || 0), p_token: tk })
+     .then(function () { setTok('w:' + shareId, tk); return path; });
+   });
+  });
+ }
+ function cloudUnpublishWork(session) {
+  if (!session.shareId) return;
+  var tk = getTok('w:' + session.shareId);
+  if (tk) sbRpc('unpublish_work', { p_share: session.shareId, p_token: tk }).catch(function () {});
+  setTok('w:' + session.shareId, '');
+ }
+ function cloudSearchWorks(q) {
+  var qq = q.replace(/[^A-Za-z0-9_\- ]/g, '');
+  var filter = qq ? '&or=(share_id.eq.' + encodeURIComponent(qq) + ',title.ilike.*' + encodeURIComponent(qq) + '*)' : '';
+  return sbSelect('works', 'select=*&order=created_at.desc&limit=30' + filter);
+ }
+
+ /* ---------- Setting のクラウド設定シート ---------- */
+ function openCloudSheet(onDone) {
+  openSheet('☁ Cloud', function (body, close) {
+   var c = lsGet(SB_LS, null) || {};
+   body.innerHTML = '<div class="field"><span>URL</span><input id="sbUrl" placeholder="https://xxxx.supabase.co" autocapitalize="off" autocorrect="off"></div>' +
+    '<div class="field" style="margin-top:10px"><span>Key (anon)</span><input id="sbKey" autocapitalize="off" autocorrect="off"></div>' +
+    '<div class="row" style="margin-top:14px"><button class="primary grow big" id="sbSave">✓</button><button class="ghost big" id="sbOff">🗑</button></div>';
+   $('#sbUrl', body).value = c.url || ''; $('#sbKey', body).value = c.key || '';
+   $('#sbSave', body).addEventListener('click', function () {
+    var url = ($('#sbUrl', body).value || '').trim(), key = ($('#sbKey', body).value || '').trim();
+    if (!/^https:\/\//.test(url) || !key) { toast('URL / Key?'); return; }
+    lsSet(SB_LS, { url: url, key: key });
+    sbSelect('works', 'select=share_id&limit=1').then(function () { toast('☁ ✓'); close(); if (onDone) onDone(); }, function () { toast('☁ ✕'); });
+   });
+   $('#sbOff', body).addEventListener('click', function () { lsSet(SB_LS, null); close(); if (onDone) onDone(); });
+  });
+ }
  /* ══════════════ スレッド（データ） ══════════════ */
  var THREADS_KEY = 'sonova.threads';
  function getThreads() { var t = lsGet(THREADS_KEY, []); return Array.isArray(t) ? t : []; }
@@ -1622,6 +1791,7 @@
  }
  function statusLabel(s) { return s === 'closed' ? 'Closed' : s === 'full' ? 'Full' : 'Open'; }
  function removeThreadData(th) {
+  cloudDeleteThread(th);
   (th.layers || []).forEach(function (l) { delAudio('layer_' + l.id); });
   setThreads(getThreads().filter(function (t) { return t.id !== th.id; }));
  }
@@ -1848,7 +2018,7 @@
    '<div class="grow"><div style="font-size:14px;font-weight:800;overflow-wrap:anywhere">' + esc(th.title) + '</div>' +
    (th.songTitle ? '<div class="sub">♪ ' + esc(th.songTitle) + '</div>' : '') + '</div>' +
    '<div class="chips" style="justify-content:flex-end;flex:0 0 auto;max-width:48%">' +
-   (mine ? '<span class="badge host">★</span>' : '') + (th.needWallet ? '<span class="badge">🔐</span>' : '') + (th.parent ? '<span class="badge">⑂</span>' : '') + (freshCount(th) && mine ? '<span class="badge warn">NEW ' + freshCount(th) + '</span>' : '') +
+   (mine ? '<span class="badge host">★</span>' : '') + (th.needWallet ? '<span class="badge">🔐</span>' : '') + (th.cloud ? '<span class="badge">☁</span>' : '') + (th.parent ? '<span class="badge">⑂</span>' : '') + (freshCount(th) && mine ? '<span class="badge warn">NEW ' + freshCount(th) + '</span>' : '') +
    '<span class="badge' + (th.isPublic ? ' live' : '') + '">' + (th.isPublic ? '🌐 Public' : '🔒 Private') + '</span>' +
    '<span class="badge' + (s === 'open' ? ' live' : s === 'full' ? ' warn' : '') + '">' + statusLabel(s) + '</span></div></div>' +
    '<div class="chips" style="margin-top:8px">' +
@@ -1871,10 +2041,11 @@
   return card;
  }
  function renderThreads(view) {
-  var genre = 'all', query = '';
+  var genre = 'all', query = '', explore = false;
   view.innerHTML =
    '<div class="row"><div class="grow"><h1>Threads</h1></div>' +
    '<button class="ghost big" id="thImport" aria-label="Import">⤓</button><button class="primary big" id="thCreate" aria-label="New">＋</button></div>' +
+   (cloudOn() ? '<div class="seg" id="thTabs"><button data-x="0" class="on">♪</button><button data-x="1">☁</button></div>' : '') +
    '<input id="thSearch" placeholder="🔍">' +
    '<div class="chips" id="thGenres"></div>' +
    '<div class="list" id="thList"></div>' +
@@ -1890,7 +2061,28 @@
     gEl.appendChild(b);
    });
   }
+  function drawExplore() {
+   listEl.innerHTML = '<div class="empty">…</div>';
+   cloudBrowse().then(function (rows) {
+    var ql = query.trim().toLowerCase();
+    rows = rows.filter(function (r) { var m = r.meta || {}; return (genre === 'all' || m.genre === genre) && (!ql || (m.title || '').toLowerCase().indexOf(ql) >= 0 || (m.songTitle || '').toLowerCase().indexOf(ql) >= 0); });
+    listEl.innerHTML = '';
+    if (!rows.length) { listEl.innerHTML = '<div class="empty">—</div>'; return; }
+    rows.forEach(function (r) {
+     var m = r.meta || {}, card = document.createElement('div');
+     card.className = 'card';
+     card.innerHTML = '<div class="row" style="align-items:flex-start"><div class="grow"><div style="font-size:14px;font-weight:800;overflow-wrap:anywhere">' + esc(m.title) + '</div>' +
+      (m.songTitle ? '<div class="sub">♪ ' + esc(m.songTitle) + '</div>' : '') + '</div><span class="badge">☁</span></div>' +
+      '<div class="sub" style="margin-top:8px">' + esc(m.genre || '') + ' · ' + m.bpm + ' BPM · ' + esc(m.timeSignature || '') + ' · ' + esc(m.hostName || '') + '</div>';
+     var b = document.createElement('button');
+     b.className = 'primary wide big'; b.style.marginTop = '10px'; b.textContent = '＋';
+     b.addEventListener('click', function () { location.hash = '#/t/' + r.id; });
+     card.appendChild(b); listEl.appendChild(card);
+    });
+   }, function (e) { listEl.innerHTML = '<div class="empty">☁ ✕</div>'; });
+  }
   function drawList() {
+   if (explore) { drawExplore(); return; }
    var ql = query.trim().toLowerCase();
    var list = getThreads().filter(function (t) {
     if (genre !== 'all' && t.genre !== genre) return false;
@@ -1905,6 +2097,8 @@
    list.forEach(function (t) { listEl.appendChild(threadCard(t, openThread, drawList)); });
   }
   $('#thSearch', view).addEventListener('input', function () { query = this.value; drawList(); });
+  var tabsEl = $('#thTabs', view);
+  if (tabsEl) tabsEl.addEventListener('click', function (e) { var x = e.target.getAttribute && e.target.getAttribute('data-x'); if (x === null || x === undefined) return; explore = x === '1'; Array.prototype.forEach.call(tabsEl.children, function (b) { b.className = b.getAttribute('data-x') === x ? 'on' : ''; }); drawList(); });
   $('#thCreate', view).addEventListener('click', openCreateThread);
   $('#thImport', view).addEventListener('click', function () { $('#thFile', view).click(); });
   $('#thFile', view).addEventListener('change', function () {
@@ -1945,7 +2139,7 @@
    '<div class="row wrap"><button class="primary grow big" id="thRec">● ＋</button>' +
    '<button class="secondary grow big" id="thMix">⤓ Mix</button></div>' +
    '<section class="card"><div class="cardHead"><h2>☰</h2><span class="badge" id="thLayerCount"></span></div><div class="list" id="thLayers"></div></section>' +
-   '<div class="row wrap"><button class="ghost big grow" id="thExport" aria-label="Share">⇪</button><button class="ghost big grow" id="thFork" aria-label="Fork">⑂</button><span class="row wrap" id="thHostBtns" style="display:contents"></span>' +
+   '<div class="row wrap"><button class="ghost big grow" id="thExport" aria-label="Share">⇪</button><button class="ghost big grow" id="thFork" aria-label="Fork">⑂</button><button class="ghost big grow" id="thLink" aria-label="Link">🔗</button><button class="ghost big grow" id="thSync" aria-label="Sync" hidden>⟳</button><span class="row wrap" id="thHostBtns" style="display:contents"></span>' +
    '<button class="danger big" id="thDelete" aria-label="Delete">🗑</button></div>';
 
   function q(s) { return root.querySelector(s); }
@@ -1989,6 +2183,8 @@
    el.mix.disabled = !activeLayers(t).length;
    // ホスト操作
    el.hostBtns.innerHTML = '';
+   q('#thSync').hidden = !(t.cloud && cloudOn());
+   q('#thLink').style.opacity = cloudOn() ? '' : '.45';
    if (canManage()) {
     var close = document.createElement('button');
     close.className = 'ghost big';
@@ -1996,7 +2192,7 @@
     close.setAttribute('aria-label', 'Close thread');
     close.addEventListener('click', function () {
      var cur = th(); cur.status = cur.status === 'closed' ? 'open' : 'closed'; cur.status = statusOf(cur);
-     saveThread(cur); refresh();
+     saveThread(cur); cloudSetStatus(cur); refresh();
     });
     el.hostBtns.appendChild(close);
    }
@@ -2056,7 +2252,7 @@
      mt.addEventListener('click', function () {
       var cur = th(), ly = cur.layers.filter(function (x) { return x.id === l.id; })[0];
       if (!ly) return;
-      ly.hostOff = !isOff(ly); ly.muted = false; ly.fresh = false; saveThread(cur);
+      ly.hostOff = !isOff(ly); ly.muted = false; ly.fresh = false; saveThread(cur); cloudSetOff(cur, ly);
       if (P.gains[l.id]) P.gains[l.id].gain.value = ly.hostOff ? 0 : (ly.volume == null ? 1 : ly.volume);
       renderLayers(); renderInfo();
      });
@@ -2093,6 +2289,7 @@
   function deleteLayer(layerId) {
    stopAll();
    var cur = th(); if (!cur) return;
+   cur.layers.filter(function (x) { return x.id === layerId; }).forEach(function (x) { cloudDeleteLayer(cur, x); });
    cur.layers = cur.layers.filter(function (x) { return x.id !== layerId; });
    cur.status = statusOf(cur);
    saveThread(cur);
@@ -2457,6 +2654,7 @@
      else cur.layers.push(layer);
      cur.status = statusOf(cur);
      saveThread(cur); bump('layers');
+     if (cur.cloud) { cloudPushLayer(cur, layer).then(function () { var c2 = th(); if (c2) { c2.layers.forEach(function (x) { if (x.id === layer.id) x.cloud = true; }); saveThread(c2); } toast('☁ ✓'); }, errToast); }
      closeSheet();
      toast('✓');
      refresh();
@@ -2517,6 +2715,21 @@
    });
   });
   q('#thExport').addEventListener('click', function () { var t = th(); if (t) exportThread(t); });
+  function doSync(quiet) {
+   var t = th(); if (!t || !t.cloud || !cloudOn()) return;
+   if (P.playing || recS) return;
+   cloudPull(t.id).then(function (r) { if (destroyed) return; if (!quiet || r.added) toast(r.added ? '☁ +' + r.added : '☁ ✓'); refresh(); }, function (e) { if (!quiet) errToast(e); });
+  }
+  q('#thSync').addEventListener('click', function () { doSync(false); });
+  q('#thLink').addEventListener('click', function () {
+   var t = th(); if (!t) return;
+   if (!cloudOn()) { toast('☁ Setting'); return; }
+   function copy() { var link = threadLink(th()); copyText(link).then(function (okc) { if (okc) toast('🔗 ✓'); else openSheet('🔗', function (b) { b.innerHTML = '<div class="field"><input id="lkIn" readonly></div>'; $('#lkIn', b).value = link; $('#lkIn', b).select(); }); }); }
+   if (t.cloud) { copy(); return; }
+   if (t.hostId !== profile.id) { toast('★ Host'); return; }
+   toast('☁ …');
+   cloudPublishThread(t).then(function () { refresh(); copy(); }, errToast);
+  });
   q('#thFork').addEventListener('click', function () {
    var t = th(); if (!t) return;
    confirmSheet('⑂ Fork?', t.title, 'Fork', function () {
@@ -2570,6 +2783,7 @@
    if (tview && tview.destroy === destroy) tview = null;
   }
   refresh();
+  doSync(true);
   tview = { threadId: threadId, destroy: destroy };
   return tview;
  }
@@ -2753,8 +2967,12 @@
    $('#pubGo', body).addEventListener('click', function () {
     var id = ($('#pubId', body).value || '').trim();
     if (!/^[A-Za-z0-9_-]{4,12}$/.test(id)) { toast('4–12: a-z 0-9 - _'); return; }
-    patchSession(session.id, { isPublic: true, shareId: id });
-    close(); toast('🌐 ✓'); onDone();
+    if (!cloudOn()) { patchSession(session.id, { isPublic: true, shareId: id }); close(); toast('🌐 ✓'); onDone(); return; }
+    var go = $('#pubGo', body); go.disabled = true; go.textContent = '…';
+    cloudPublishWork(session, id).then(function (path) {
+     patchSession(session.id, { isPublic: true, shareId: id, cloudPath: path });
+     close(); toast('🌐 ☁ ✓'); onDone();
+    }, function (e) { go.disabled = false; go.textContent = '✓'; errToast(e); });
    });
   });
  }
@@ -2812,7 +3030,7 @@
      row.appendChild(b);
     }
     btn(s.isPublic ? 'primary' : 'ghost', '🌐', 'Public', function () {
-     if (s.isPublic) { patchSession(s.id, { isPublic: false }); toast('🔒'); drawMine(); }
+     if (s.isPublic) { cloudUnpublishWork(s); patchSession(s.id, { isPublic: false, cloudPath: '' }); toast('🔒'); drawMine(); }
      else openPublishSheet(s, drawMine);
     });
     btn('ghost', '✎', 'Rename', function () { askRename(s, drawMine); });
@@ -2823,13 +3041,40 @@
     });
     btn('ghost', '⤓', 'Download', function () { downloadSession(s); });
     btn('danger', '🗑', 'Delete', function () {
-     confirmSheet('Delete?', s.title, 'Delete', function () { removeSession(s.id); toast('Deleted'); drawMine(); });
+     confirmSheet('Delete?', s.title, 'Delete', function () { if (s.isPublic) cloudUnpublishWork(s); removeSession(s.id); toast('Deleted'); drawMine(); });
     });
     card.appendChild(row);
     list.appendChild(card);
    });
   }
+  function drawCloudSearch() {
+   body.innerHTML = '<div class="row" style="margin-bottom:10px"><input id="libQuery" placeholder="ID / title"><button class="pill big" id="libGo">🔍</button></div><div class="list" id="searchList"></div>';
+   var query = $('#libQuery', body), list = $('#searchList', body);
+   function run() {
+    list.innerHTML = '<div class="empty">…</div>';
+    cloudSearchWorks((query.value || '').trim()).then(function (rows) {
+     if (!rows.length) { list.innerHTML = '<div class="empty">—</div>'; return; }
+     list.innerHTML = '';
+     rows.forEach(function (w) {
+      var card = document.createElement('div'); card.className = 'card';
+      card.innerHTML = '<div class="row" style="align-items:flex-start"><div class="grow"><div style="font-size:13px;font-weight:700;overflow-wrap:anywhere">' + esc(w.title) + '</div><div class="sub">' + esc(w.share_id) + ' · ' + fmtTime(w.duration) + '</div></div><span class="badge live">🌐 ☁</span></div>';
+      var au = document.createElement('audio'); au.controls = true; au.preload = 'none'; au.src = audioUrl(w.path); au.style.marginTop = '8px';
+      card.appendChild(au);
+      var row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '8px';
+      function b(txt, label, fn) { var x = document.createElement('button'); x.className = 'ghost big grow'; x.textContent = txt; x.setAttribute('aria-label', label); x.addEventListener('click', fn); row.appendChild(x); }
+      if (w.credits && w.credits.creators) b('🏷', 'Credits', function () { openCreditsSheet(w.credits, w.title); });
+      if (w.anchor && w.anchor.sig) b('⚓', 'Anchor', function () { openAnchorInfo({ anchor: w.anchor }); });
+      if (row.children.length) card.appendChild(row);
+      list.appendChild(card);
+     });
+    }, function () { list.innerHTML = '<div class="empty">☁ ✕</div>'; });
+   }
+   $('#libGo', body).addEventListener('click', run);
+   query.addEventListener('keydown', function (e) { if (e.key === 'Enter') run(); });
+   run();
+  }
   function drawSearch() {
+   if (cloudOn()) { drawCloudSearch(); return; }
    var publics = getSessions().filter(function (s) { return s.isPublic && s.hasAudio; });
    body.innerHTML = '<div class="row" style="margin-bottom:10px"><input id="libQuery" placeholder="ID / title"><button class="pill big" id="libGo">🔍</button></div>' +
     '<div class="list" id="searchList"></div>';
@@ -2891,7 +3136,8 @@
   var st = getSettings();
   view.innerHTML = '<h1>Setting</h1>' +
    '<div class="card">' +
-   '<div class="row"><span class="grow">🔗 Wallet</span><button class="pill big" id="stWallet"></button></div>' +
+   '<div class="row"><span class="grow">☁ Cloud</span><button class="pill big" id="stCloud"></button></div>' +
+   '<div class="row" style="margin-top:12px"><span class="grow">🔗 Wallet</span><button class="pill big" id="stWallet"></button></div>' +
    '<div class="row" style="margin-top:12px"><span class="grow">🎧 Latency</span><button class="iconBtn" id="stLatDn">−</button><span class="bpm" id="stLat" style="min-width:64px;text-align:center"></span><button class="iconBtn" id="stLatUp">+</button></div>' +
    '<div class="row" style="margin-top:12px"><span class="grow">① Count-in</span><div class="seg" id="stCount" style="width:130px"><button data-v="1">1</button><button data-v="2">2</button></div></div>' +
    '<div class="row" style="margin-top:12px"><span class="grow">▤ Storage</span><span class="sub" id="stStore">…</span></div>' +
@@ -2901,11 +3147,13 @@
   function drawSet() {
    var s = getSettings();
    $('#stLat', view).textContent = s.latency + ' ms';
+   var cb = $('#stCloud', view); cb.textContent = cloudOn() ? '✓' : '—'; cb.className = (cloudOn() ? 'pill on' : 'pill') + ' big';
    var wb = $('#stWallet', view), wa = getWallet();
    wb.textContent = wa ? shortAddr(wa) + ' ✕' : 'Connect';
    wb.className = (wa ? 'pill on' : 'pill') + ' big';
    Array.prototype.forEach.call($('#stCount', view).children, function (b) { b.className = String(s.countBars) === b.getAttribute('data-v') ? 'on' : ''; });
   }
+  $('#stCloud', view).addEventListener('click', function () { openCloudSheet(drawSet); });
   $('#stWallet', view).addEventListener('click', function () { if (getWallet()) disconnectWallet(drawSet); else connectWallet(drawSet); });
   $('#stLatDn', view).addEventListener('click', function () { saveSettings({ latency: clamp(getSettings().latency - 10, 0, 500) }); drawSet(); });
   $('#stLatUp', view).addEventListener('click', function () { saveSettings({ latency: clamp(getSettings().latency + 10, 0, 500) }); drawSet(); });
@@ -2931,11 +3179,21 @@
   });
  }
 
+/* ══════════════ 共有リンクから開く ══════════════ */
+ function renderCloudOpen(view, id, cfgTok) {
+  if (cfgTok && !cloudOn()) applyCfgToken(cfgTok);
+  view.innerHTML = '<div class="empty">…</div>';
+  if (!cloudOn()) { view.innerHTML = '<div class="empty">☁<br><br><a class="pill" href="#/profile" style="display:inline-flex;align-items:center;padding:0 14px">⚙</a></div>'; return; }
+  cloudPull(id).then(function () { location.replace('#/thread/' + id); }, function (e) {
+   view.innerHTML = '<div class="empty">' + (e && e.message === 'gone' ? '—' : '☁ ✕') + '<br><br><a class="pill" href="#/threads" style="display:inline-flex;align-items:center;padding:0 14px">←</a></div>';
+  });
+ }
+
  /* ══════════════ ルーター ══════════════ */
  function updateNav(path) {
   var tab = path;
   if (path === '/room') tab = '/rooms';
-  else if (path === '/thread') tab = '/threads';
+  else if (path === '/thread' || path === '/t') tab = '/threads';
   else if (path === '/history') tab = '/profile';
   var links = document.querySelectorAll('#nav a');
   for (var i = 0; i < links.length; i++) links[i].className = links[i].getAttribute('data-tab') === tab ? 'on' : '';
@@ -2946,6 +3204,7 @@
   var path = '/' + (parts[0] || '');
   var nextRoomId = parts[0] === 'room' ? parts[1] : null;
   var nextThreadId = parts[0] === 'thread' ? parts[1] : null;
+  var cloudId = parts[0] === 't' ? parts[1] : null;
   if (jam) { jam.destroy(); jam = null; }
   if (tview) { tview.destroy(); tview = null; }
   closeAllSheets();
@@ -2953,6 +3212,7 @@
   view.innerHTML = '';
   window.scrollTo(0, 0);
   updateNav(path);
+  if (cloudId) { renderCloudOpen(view, cloudId, parts[2]); return; }
   if (nextRoomId) { renderRoomView(view, nextRoomId); return; }
   if (nextThreadId) { renderThreadView(view, nextThreadId); return; }
   if (path === '/rooms') return renderRooms(view);
