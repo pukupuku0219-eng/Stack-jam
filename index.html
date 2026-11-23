@@ -1527,7 +1527,8 @@
   { id: 'mix', ico: '⤓', name: 'Mix', ok: function (s) { return (s.mixes || 0) >= 1; } },
   { id: 'cr1', ico: '🏷', name: 'Credited', ok: function (s) { return (s.credited || 0) >= 1; } },
   { id: 'cr5', ico: '🏅', name: 'Credited ×5', ok: function (s) { return (s.credited || 0) >= 5; } },
-  { id: 'fork', ico: '⑂', name: 'Fork', ok: function (s) { return (s.forks || 0) >= 1; } }
+  { id: 'fork', ico: '⑂', name: 'Fork', ok: function (s) { return (s.forks || 0) >= 1; } },
+  { id: 'anchor', ico: '⚓', name: 'Anchor', ok: function (s) { return (s.anchors || 0) >= 1; } }
  ];
  function badgesHtml() {
   var s = getStats();
@@ -1537,6 +1538,73 @@
   }).join('');
  }
 
+ /* ══════════════ Anchor: ミックスのクレジットのハッシュを Solana devnet に Memo として記録 ══════════════ */
+ var RPC_URL = 'https://api.devnet.solana.com', MEMO_PROGRAM = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
+ function shortvec(n) { var o = []; for (;;) { var b = n & 0x7f; n >>= 7; if (n) o.push(b | 0x80); else { o.push(b); break; } } return o; }
+ function concatBytes(parts) {
+  var total = 0, i; parts.forEach(function (p) { total += p.length; });
+  var out = new Uint8Array(total), pos = 0;
+  parts.forEach(function (p) { for (i = 0; i < p.length; i++) out[pos + i] = p[i]; pos += p.length; });
+  return out;
+ }
+ function bytesToB64(bytes) { var s = ''; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); }
+ function rpcCall(method, params) {
+  return fetch(RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: method, params: params }) })
+   .then(function (r) { return r.json(); }).then(function (j) { if (j.error) throw new Error(j.error.message || 'rpc'); return j.result; });
+ }
+ function sendMemo(text) {
+  var p = getProvider(), w = getWallet();
+  if (!p || !w) return Promise.reject(new Error('wallet'));
+  return rpcCall('getBalance', [w]).then(function (r) {
+   if ((r.value || 0) < 10000) throw new Error('funds');
+   return rpcCall('getLatestBlockhash', [{ commitment: 'finalized' }]);
+  }).then(function (r) {
+   var data = new TextEncoder().encode(text);
+   var msg = concatBytes([[1, 0, 1], shortvec(2), b58dec(w), b58dec(MEMO_PROGRAM), b58dec(r.value.blockhash), shortvec(1), [1], shortvec(1), [0], shortvec(data.length), data]);
+   var req = Promise.resolve(p.request({ method: 'signTransaction', params: { message: b58enc(msg) } })).then(function (res) {
+    var tx = concatBytes([[1], b58dec(res.signature), msg]);
+    return rpcCall('sendTransaction', [bytesToB64(tx), { encoding: 'base64', preflightCommitment: 'confirmed' }]);
+   });
+   return req.catch(function (e) {
+    if (e && (e.message === 'funds' || /blockhash|insufficient/i.test(e.message || ''))) throw e;
+    return Promise.resolve(p.request({ method: 'signAndSendTransaction', params: { message: b58enc(msg) } })).then(function (res) { return res.signature; });
+   });
+  });
+ }
+ function waitConfirm(sig, tries) {
+  return rpcCall('getSignatureStatuses', [[sig]]).then(function (r) {
+   var s = r.value && r.value[0];
+   if (s && s.err) throw new Error('failed');
+   if (s && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) return true;
+   if (tries <= 0) return false;
+   return new Promise(function (res) { setTimeout(res, 1500); }).then(function () { return waitConfirm(sig, tries - 1); });
+  });
+ }
+ function anchorSession(s, done) {
+  if (!getWallet()) { toast('🔗 Wallet'); return; }
+  var c = s.credits; if (!c) return;
+  toast('⚓ …');
+  sha256Hex(new Blob([JSON.stringify({ m: c.mixHash, c: c.creators.map(function (x) { return x.hash; }) })])).then(function (ch) {
+   var memo = 'stackjam:v1|' + c.mixHash + '|' + ch;
+   return sendMemo(memo).then(function (sig) {
+    return waitConfirm(sig, 12).then(function (okc) {
+     patchSession(s.id, { anchor: { sig: sig, cluster: 'devnet', at: Date.now(), memo: memo, confirmed: okc } });
+     bump('anchors'); toast('⚓ ✓');
+     if (done) done();
+    });
+   });
+  }).catch(function (e) {
+   var m = (e && e.message) || '';
+   toast(m === 'funds' ? 'Need devnet SOL' : m === 'wallet' ? '🔗 Wallet' : 'Anchor failed');
+  });
+ }
+ function openAnchorInfo(s) {
+  var a = s.anchor;
+  openSheet('⚓ devnet', function (body) {
+   body.innerHTML = '<div class="kv"><div><span>Tx</span><b>' + esc(a.sig.slice(0, 8) + '…' + a.sig.slice(-6)) + '</b></div><div><span>Net</span><b>devnet</b></div></div>' +
+    '<a class="primary wide big" style="display:flex;align-items:center;justify-content:center;margin-top:14px" target="_blank" rel="noopener" href="https://explorer.solana.com/tx/' + encodeURIComponent(a.sig) + '?cluster=devnet">↗ Explorer</a>';
+  });
+ }
  /* ══════════════ スレッド（データ） ══════════════ */
  var THREADS_KEY = 'sonova.threads';
  function getThreads() { var t = lsGet(THREADS_KEY, []); return Array.isArray(t) ? t : []; }
@@ -2749,6 +2817,10 @@
     });
     btn('ghost', '✎', 'Rename', function () { askRename(s, drawMine); });
     if (s.credits) btn('ghost', '🏷', 'Credits', function () { openCreditsSheet(s.credits, s.title); });
+    if (s.credits) btn(s.anchor ? 'primary' : 'ghost', '⚓', 'Anchor', function () {
+     if (s.anchor) openAnchorInfo(s);
+     else confirmSheet('⚓ devnet?', '≈ 0.000005 SOL', 'Anchor', function () { anchorSession(s, drawMine); });
+    });
     btn('ghost', '⤓', 'Download', function () { downloadSession(s); });
     btn('danger', '🗑', 'Delete', function () {
      confirmSheet('Delete?', s.title, 'Delete', function () { removeSession(s.id); toast('Deleted'); drawMine(); });
