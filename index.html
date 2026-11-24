@@ -1567,7 +1567,9 @@
    });
    return req.catch(function (e) {
     if (e && (e.message === 'funds' || /blockhash|insufficient/i.test(e.message || ''))) throw e;
-    return Promise.resolve(p.request({ method: 'signAndSendTransaction', params: { message: b58enc(msg) } })).then(function (res) { return res.signature; });
+    var first = 'signTransaction: ' + ((e && e.message) || String(e));
+    return Promise.resolve(p.request({ method: 'signAndSendTransaction', params: { message: b58enc(msg) } })).then(function (res) { return res.signature; })
+     .catch(function (e2) { throw new Error(first + ' / signAndSendTransaction: ' + ((e2 && e2.message) || String(e2))); });
    });
   });
  }
@@ -1596,6 +1598,7 @@
   }).catch(function (e) {
    var m = (e && e.message) || '';
    toast(m === 'funds' ? 'Need devnet SOL' : m === 'wallet' ? '🔗 Wallet' : 'Anchor failed');
+   if (m !== 'funds' && m !== 'wallet') { try { alert('Anchor failed\n' + (m || String(e))); } catch (_) {} }
   });
  }
  function openAnchorInfo(s) {
