@@ -1598,7 +1598,12 @@
   }).catch(function (e) {
    var m = (e && e.message) || '';
    toast(m === 'funds' ? 'Need devnet SOL' : m === 'wallet' ? '🔗 Wallet' : 'Anchor failed');
-   if (m !== 'funds' && m !== 'wallet') { try { alert('Anchor failed\n' + (m || String(e))); } catch (_) {} }
+   if (m !== 'funds' && m !== 'wallet') {
+    var detail = (m || String(e)) + '\n\nUA: ' + navigator.userAgent;
+    openSheet('Anchor failed (v3)', function (body) {
+     body.innerHTML = '<pre style="white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text;font-size:13px;line-height:1.5">' + esc(detail) + '</pre>';
+    });
+   }
   });
  }
  function openAnchorInfo(s) {
@@ -3040,7 +3045,7 @@
     if (s.credits) btn('ghost', '🏷', 'Credits', function () { openCreditsSheet(s.credits, s.title); });
     if (s.credits) btn(s.anchor ? 'primary' : 'ghost', '⚓', 'Anchor', function () {
      if (s.anchor) openAnchorInfo(s);
-     else confirmSheet('⚓ devnet?', '≈ 0.000005 SOL', 'Anchor', function () { anchorSession(s, drawMine); });
+     else confirmSheet('⚓ devnet? (v3)', '≈ 0.000005 SOL', 'Anchor', function () { anchorSession(s, drawMine); });
     });
     btn('ghost', '⤓', 'Download', function () { downloadSession(s); });
     btn('danger', '🗑', 'Delete', function () {
