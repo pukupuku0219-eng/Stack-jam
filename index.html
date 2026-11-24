@@ -1552,6 +1552,34 @@
   return fetch(RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: method, params: params }) })
    .then(function (r) { return r.json(); }).then(function (j) { if (j.error) throw new Error(j.error.message || 'rpc'); return j.result; });
  }
+ /* Phantom の返り値はウォレットや端末で形が違う。署名済み取引のバイト列に揃える */
+ function anyBytes(x) {
+  if (!x) return null;
+  if (typeof x === 'string') { try { return b58dec(x); } catch (e) { return null; } }
+  if (x instanceof Uint8Array) return x;
+  if (Array.isArray(x)) return Uint8Array.from(x);
+  if (x.data && Array.isArray(x.data)) return Uint8Array.from(x.data);
+  if (typeof x === 'object') {
+   var ks = Object.keys(x).filter(function (k) { return /^\d+$/.test(k); });
+   if (ks.length) { var o = new Uint8Array(ks.length); ks.forEach(function (k) { o[+k] = x[k]; }); return o; }
+  }
+  return null;
+ }
+ function signedTxBytes(res, msg) {
+  if (!res) return null;
+  if (typeof res.serialize === 'function') { try { return new Uint8Array(res.serialize()); } catch (e) {} }
+  if (typeof res === 'string') return b58dec(res);
+  var raw = res.transaction || res.signedTransaction;
+  if (raw) { var rb = anyBytes(raw); if (rb && rb.length > 64) return rb; }
+  var sig = null;
+  if (res.signature) sig = anyBytes(res.signature);
+  else if (res.signatures && res.signatures.length) {
+   var s0 = res.signatures[0];
+   sig = anyBytes(s0 && typeof s0 === 'object' && ('signature' in s0) && !('0' in s0) ? s0.signature : s0);
+  }
+  if (sig && sig.length === 64) return concatBytes([shortvec(1), sig, msg]);
+  return null;
+ }
  function sendMemo(text) {
   var p = getProvider(), w = getWallet();
   if (!p || !w) return Promise.reject(new Error('wallet'));
@@ -1564,11 +1592,8 @@
    /* Phantom は「署名欄つきの取引全体」を受け取る。署名欄は 64 バイトの 0 で空けておく */
    var unsigned = concatBytes([shortvec(1), new Uint8Array(64), msg]);
    var req = Promise.resolve(p.request({ method: 'signTransaction', params: { message: b58enc(unsigned) } })).then(function (res) {
-    var tx;
-    var raw = typeof res === 'string' ? res : (res && (res.transaction || res.signedTransaction));
-    if (raw) tx = b58dec(raw);
-    else if (res && res.signature) tx = concatBytes([shortvec(1), b58dec(res.signature), msg]);
-    else throw new Error('unknown signTransaction result: ' + JSON.stringify(res).slice(0, 120));
+    var tx = signedTxBytes(res, msg);
+    if (!tx) throw new Error('unknown signTransaction result: ' + JSON.stringify(res).slice(0, 160));
     return rpcCall('sendTransaction', [bytesToB64(tx), { encoding: 'base64', preflightCommitment: 'confirmed' }]);
    });
    return req.catch(function (e) {
@@ -1606,7 +1631,7 @@
    toast(m === 'funds' ? 'Need devnet SOL' : m === 'wallet' ? '🔗 Wallet' : 'Anchor failed');
    if (m !== 'funds' && m !== 'wallet') {
     var detail = (m || String(e)) + '\n\nUA: ' + navigator.userAgent;
-    openSheet('Anchor failed (v4)', function (body) {
+    openSheet('Anchor failed (v5)', function (body) {
      body.innerHTML = '<pre style="white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text;font-size:13px;line-height:1.5">' + esc(detail) + '</pre>';
     });
    }
@@ -3051,7 +3076,7 @@
     if (s.credits) btn('ghost', '🏷', 'Credits', function () { openCreditsSheet(s.credits, s.title); });
     if (s.credits) btn(s.anchor ? 'primary' : 'ghost', '⚓', 'Anchor', function () {
      if (s.anchor) openAnchorInfo(s);
-     else confirmSheet('⚓ devnet? (v4)', '≈ 0.000005 SOL', 'Anchor', function () { anchorSession(s, drawMine); });
+     else confirmSheet('⚓ devnet? (v5)', '≈ 0.000005 SOL', 'Anchor', function () { anchorSession(s, drawMine); });
     });
     btn('ghost', '⤓', 'Download', function () { downloadSession(s); });
     btn('danger', '🗑', 'Delete', function () {
